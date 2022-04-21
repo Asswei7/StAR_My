@@ -421,50 +421,63 @@ def predict(args, raw_examples, dataset_list, model, verbose=True):
             for _idx_r in range(0, all_rep_src.shape[0], sim_batch_size):
                 _rep_src, _rep_tgt = all_rep_src[_idx_r: _idx_r + sim_batch_size], all_rep_tgt[
                                                                                    _idx_r: _idx_r + sim_batch_size]
-                _head = head_ent_list[_idx_r: _idx_r + sim_batch_size]
-                _tail = tail_ent_list[_idx_r: _idx_r + sim_batch_size]
-                if _idx_r < split_idx:
-                    tail = standard_dataset.ent2idx[_tail[0]]
-                    tailIdx = torch.tensor([tail]).to(args.device)
-                    with torch.no_grad():
-                        logits = model.classifier(_rep_src, _rep_tgt)
-                        logits = torch.softmax(logits, dim=-1)[:, 1]
-                        #####################################################
-                        structLogits = []
-                        for item in _head:
-                            # 从数据集中的ID转换为实际的ID号
-                            head = standard_dataset.ent2idx[item]
-                            headIdx = torch.tensor([head]).to(args.device)
-                            # 返回的是一个向量
-                            pred = model.structCal(headIdx, relIdx, tailIdx)
-                            pred = pred[0][tailIdx]
-                            structLogits.append(pred)
-
-                        structLogits = torch.tensor(structLogits).to(args.device)
-                        local_scores = structLogits + logits
-                        local_scores = local_scores.detach().cpu().numpy()
-                    local_scores_list.append(local_scores)
-                else:
-                    head = standard_dataset.ent2idx[_head[0]]
-                    headIdx = torch.tensor([head]).to(args.device)
-                    tailIdx = torch.tensor([1])
+                # _head = head_ent_list[_idx_r: _idx_r + sim_batch_size]
+                # _tail = tail_ent_list[_idx_r: _idx_r + sim_batch_size]
+                with torch.no_grad():
+                    logits = model.classifier(_rep_src, _rep_tgt)
+                    logits = torch.softmax(logits, dim=-1)[:, 1]
+                    headIdx = standard_dataset.ent2idx[_head]
+                    headIdx = torch.tensor([headIdx]).to(args.device)
+                    tailIdx = standard_dataset.ent2idx[_tail]
+                    tailIdx = torch.tensor([tailIdx]).to(args.device)
                     pred = model.structCal(headIdx, relIdx, tailIdx)
-                    with torch.no_grad():
-                        logits = model.classifier(_rep_src, _rep_tgt)
-                        logits = torch.softmax(logits, dim=-1)[:, 1]
-                        #####################################################
-                        structLogits = []
-                        for item in _tail:
-                            # 从数据集中的ID转换为实际的ID号
-                            tail = standard_dataset.ent2idx[item]
-                            tailIdx = torch.tensor([tail]).to(args.device)
-                            # 返回的是一个向量
-                            predVal = pred[0][tailIdx]
-                            structLogits.append(predVal)
-                        structLogits = torch.tensor(structLogits).to(args.device)
-                        local_scores = structLogits + logits
-                        local_scores = local_scores.detach().cpu().numpy()
-                    local_scores_list.append(local_scores)
+                    pred = torch.softmax(pred, dim=-1)[:, 1]
+                    local_scores = pred + logits
+                    local_scores = local_scores.detach().cpu().numpy()
+                local_scores_list.append(local_scores)
+
+                # if _idx_r < split_idx:
+                #     tail = standard_dataset.ent2idx[_tail[0]]
+                #     tailIdx = torch.tensor([tail]).to(args.device)
+                #     with torch.no_grad():
+                #         logits = model.classifier(_rep_src, _rep_tgt)
+                #         logits = torch.softmax(logits, dim=-1)[:, 1]
+                #         #####################################################
+                #         structLogits = []
+                #         for item in _head:
+                #             # 从数据集中的ID转换为实际的ID号
+                #             head = standard_dataset.ent2idx[item]
+                #             headIdx = torch.tensor([head]).to(args.device)
+                #             # 返回的是一个向量
+                #             pred = model.structCal(headIdx, relIdx, tailIdx)
+                #             pred = pred[0][tailIdx]
+                #             structLogits.append(pred)
+                #
+                #         structLogits = torch.tensor(structLogits).to(args.device)
+                #         local_scores = structLogits + logits
+                #         local_scores = local_scores.detach().cpu().numpy()
+                #     local_scores_list.append(local_scores)
+                # else:
+                #     head = standard_dataset.ent2idx[_head[0]]
+                #     headIdx = torch.tensor([head]).to(args.device)
+                #     tailIdx = torch.tensor([1])
+                #     pred = model.structCal(headIdx, relIdx, tailIdx)
+                #     with torch.no_grad():
+                #         logits = model.classifier(_rep_src, _rep_tgt)
+                #         logits = torch.softmax(logits, dim=-1)[:, 1]
+                #         #####################################################
+                #         structLogits = []
+                #         for item in _tail:
+                #             # 从数据集中的ID转换为实际的ID号
+                #             tail = standard_dataset.ent2idx[item]
+                #             tailIdx = torch.tensor([tail]).to(args.device)
+                #             # 返回的是一个向量
+                #             predVal = pred[0][tailIdx]
+                #             structLogits.append(predVal)
+                #         structLogits = torch.tensor(structLogits).to(args.device)
+                #         local_scores = structLogits + logits
+                #         local_scores = local_scores.detach().cpu().numpy()
+                #     local_scores_list.append(local_scores)
 
         scores = np.concatenate(local_scores_list, axis=0)
 
@@ -481,10 +494,10 @@ def predict(args, raw_examples, dataset_list, model, verbose=True):
         ranks.append(right_rank)
 
 
-        if left_rank <= 10:
-            goodSample.append(_triplet)
-        if left_rank >= 60:
-            badSample.append(_triplet)
+        # if left_rank <= 10:
+        #     goodSample.append(_triplet)
+        # if left_rank >= 60:
+        #     badSample.append(_triplet)
 
         # log
         top_ten_hit_count += (int(left_rank <= 10) + int(right_rank <= 10))
