@@ -232,6 +232,7 @@ def train(args, train_dataset, model, tokenizer, eval_dataset=None, eval_fn=eval
 
     # Prepare optimizer and schedule (linear warmup and decay)
     model, optimizer, scheduler = setup_opt(args, model)
+    model.init()
     metric_best = -1e5
     global_step = 0
 

@@ -5,7 +5,7 @@
       <paths name="sunshuwei@172.17.43.34:22">
         <serverdata>
           <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/home/team/sunshuwei/StAR_My" local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
@@ -19,7 +19,7 @@
       <paths name="sunshuwei@172.17.43.60:22 (2)">
         <serverdata>
           <mappings>
-            <mapping deploy="/home/hdd1/sunshuwei/StAR_KGC-master" local="$PROJECT_DIR$" />
+            <mapping deploy="/home/hdd2/sunshuwei/StAR_KGC-master" local="$PROJECT_DIR$" />
           </mappings>
         </serverdata>
       </paths>

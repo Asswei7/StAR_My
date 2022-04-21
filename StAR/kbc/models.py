@@ -2,11 +2,12 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from peach.nn_utils.general import exp_mask, zero_mask, masked_pool, act_name2fn
+from torch.nn.init import xavier_normal_
 
 from transformers import BertPreTrainedModel
 from transformers import BertModel
 from transformers import RobertaConfig, RobertaModel, ROBERTA_PRETRAINED_MODEL_ARCHIVE_MAP
-
+import numpy as np
 
 
 def get_pos_gain(num_labels, tensor_labels, pos_weight, neg_weight=1., float_dtype=torch.float32):
@@ -52,7 +53,7 @@ class BertForPairCls(BertPreTrainedModel):
     def forward(self, src_input_ids, tgt_input_ids,
                 src_attention_mask=None, tgt_attention_mask=None,
                 src_token_type_ids=None, tgt_token_type_ids=None,
-                labels=None, *args, **kwargs):
+                labels=None,  *args, **kwargs):
         rep_src = self.encoder(src_input_ids, attention_mask=src_attention_mask, token_type_ids=src_token_type_ids)
         rep_tgt = self.encoder(tgt_input_ids, attention_mask=tgt_attention_mask, token_type_ids=tgt_token_type_ids)
         logits = self.classifier(rep_src, rep_tgt)
@@ -326,6 +327,25 @@ class RobertaForPairScoring(BertPreTrainedModel):
 
     def __init__(self, config):
         super(RobertaForPairScoring, self).__init__(config)
+        ##################################################################################################
+        # Tucker相关初始化
+        # 如果获得实体数目
+        self.ent_dim = 200
+        self.ent_num = config.ent_num
+        d1 = self.ent_dim
+        self.E = torch.nn.Embedding(self.ent_num, d1)
+        self.R = torch.nn.Embedding(self.ent_num, d1)
+        self.W = torch.nn.Parameter(torch.tensor(np.random.uniform(-1, 1, (d1, d1, d1)),
+                                                 dtype=torch.float, requires_grad=True))
+        # 通过字典获得dropout值
+        self.input_dropout = torch.nn.Dropout(0.3)
+        self.hidden_dropout1 = torch.nn.Dropout(0.4)
+        self.hidden_dropout2 = torch.nn.Dropout(0.5)
+        self.loss = torch.nn.BCELoss()
+
+        self.bn0 = torch.nn.BatchNorm1d(d1)
+        self.bn1 = torch.nn.BatchNorm1d(d1)
+        ##################################################################################################
         self.num_labels = self.config.num_labels
         self.roberta = RobertaModel(config)
 
@@ -403,12 +423,47 @@ class RobertaForPairScoring(BertPreTrainedModel):
             logits = logits.squeeze(-1)
         return logits
 
+    def structCal(self,  headIdx, relIdx, tailIdx):
+        e1 = self.E(headIdx)
+        x = self.bn0(e1)
+        x = self.input_dropout(x)
+        x = x.view(-1, 1, e1.size(1))
+
+        r = self.R(relIdx)
+        W_mat = torch.mm(r, self.W.view(r.size(1), -1))
+        W_mat = W_mat.view(-1, e1.size(1), e1.size(1))
+        W_mat = self.hidden_dropout1(W_mat)
+
+        x = torch.bmm(x, W_mat)
+        x = x.view(-1, e1.size(1))
+        x = self.bn1(x)
+        x = self.hidden_dropout2(x)
+        x = torch.mm(x, self.E.weight.transpose(1, 0))
+        # 是实体数目个维度，
+        pred = torch.sigmoid(x)
+        return pred
+
+    def init(self):
+        # 权重初始化方法
+        xavier_normal_(self.E.weight.data)
+        xavier_normal_(self.R.weight.data)
+
     def forward(self, src_input_ids, tgt_input_ids,
                 src_attention_mask=None, tgt_attention_mask=None,
                 src_token_type_ids=None, tgt_token_type_ids=None,
-                label_dict=None,
+                label_dict=None,pos_ratio=None, neg_ratio=None,
+                headIdx=None, relIdx=None, tailIdx=None,
                 *args, **kwargs):
-
+        ##############################################################################
+        pred = self.structCal(headIdx, relIdx, tailIdx)
+        targets = np.zeros((len(tailIdx), self.ent_num))
+        # 应该是一个batch的
+        for idx, item in enumerate(tailIdx):
+            targets[idx, item] = 1
+        # pdb.set_trace()
+        targets = torch.tensor(targets, dtype=torch.float).to(pred.device)
+        structLoss = self.loss(pred, targets)
+        ##############################################################################
         rep_src = self.encoder(src_input_ids, attention_mask=src_attention_mask, token_type_ids=src_token_type_ids)
         rep_tgt = self.encoder(tgt_input_ids, attention_mask=tgt_attention_mask, token_type_ids=tgt_token_type_ids)
 
@@ -439,8 +494,8 @@ class RobertaForPairScoring(BertPreTrainedModel):
                 attention_mask=label_dict["neg_tgt_attention_mask"].view(bs*nt, -1),
                 token_type_ids=neg_tgt_token_type_ids)
 
-            pos_distances = distances.unsqueeze(1).expand(-1, nt).reshape(bs*nt)  # bs*nt
-            neg_distances = self.distance_metric_fn(rep_neg_src, rep_neg_tgt)  # bs*nt
+            # pos_distances = distances.unsqueeze(1).expand(-1, nt).reshape(bs*nt)  # bs*nt
+            # neg_distances = self.distance_metric_fn(rep_neg_src, rep_neg_tgt)  # bs*nt
 
 
             logits = self.classifier(  # [6bs,2]
@@ -467,10 +522,11 @@ class RobertaForPairScoring(BertPreTrainedModel):
                 )
             )
             # 2. ranking loss
-            rk_losses = torch.relu(self.hinge_loss_margin + pos_distances - neg_distances)
-            rk_loss = torch.mean(rk_losses)
-
-            loss = self.cls_loss_weight * cls_loss + self.loss_weight * rk_loss
+            # rk_losses = torch.relu(self.hinge_loss_margin + pos_distances - neg_distances)
+            # rk_loss = torch.mean(rk_losses)
+            pos_ratio = torch.mean(pos_ratio)
+            pos_ratio /= 2
+            loss = self.cls_loss_weight * cls_loss + pos_ratio * structLoss
             outputs.insert(0, loss)
         else:
             logits = self.classifier(  # [2bs,2]

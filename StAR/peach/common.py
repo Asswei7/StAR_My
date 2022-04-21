@@ -4,7 +4,8 @@ import os
 import csv
 import sys
 
-StAR_FILE_PATH = None  # Your own file path
+StAR_FILE_PATH = '/home/hdd2/sunshuwei/StAR_KGC-master/'  # Your own file path
+
 
 def _truncate_seq_pair(tokens_a, tokens_b, max_length):
     """Truncates a sequence pair in place to the maximum length."""
@@ -86,7 +87,7 @@ def save_pkll_with_offset(obj, path):
     pair_offset_list = []
     for _idx in range(len(offset_list)):
         if _idx < len(offset_list) - 1:
-            pair_offset_list.append([offset_list[_idx], offset_list[_idx+1] - offset_list[_idx]])
+            pair_offset_list.append([offset_list[_idx], offset_list[_idx + 1] - offset_list[_idx]])
         else:
             pair_offset_list.append([offset_list[_idx], last_offset - offset_list[_idx]])
     return pair_offset_list
@@ -184,7 +185,6 @@ def get_val_str_from_dict(val_dict):
 
 
 def parse_span_str(_span_str, min_val=0, max_val=10000):
-
     if isinstance(_span_str, (int, float)):
         return int(_span_str), max_val
     elif isinstance(_span_str, type(None)):
@@ -200,7 +200,7 @@ def parse_span_str(_span_str, min_val=0, max_val=10000):
         else:
             return min_val, max_val
     elif len(lst) == 2:
-        _minv, _maxv  = min_val, max_val
+        _minv, _maxv = min_val, max_val
         if len(lst[0]) > 0:
             _minv = int(lst[0])
         if len(lst[1]) > 0:
@@ -221,5 +221,3 @@ def get_statistics_for_num_list(num_list):
     res["std"] = np.std(arr)
     res["len"] = len(num_list)
     return res
-
-

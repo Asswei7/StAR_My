@@ -186,15 +186,21 @@ def setup_prerequisite(args):
         ptvsd.wait_for_attach()
 
     # 3. Setup CUDA, GPU & distributed training
-    if args.local_rank == -1 or args.no_cuda:
-        device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
-        args.n_gpu = torch.cuda.device_count()
-    else:
-        torch.cuda.set_device(args.local_rank)
-        device = torch.device("cuda", args.local_rank)
-        torch.distributed.init_process_group(backend='nccl')
-        args.n_gpu = 1
-    args.device = device
+    # if args.local_rank == -1 or args.no_cuda:
+    #     # device = torch.device("cuda:1" if torch.cuda.is_available() and not args.no_cuda else "cpu")
+    #     device = torch.device("cuda:1")
+    #     args.n_gpu = 1
+    #     # args.n_gpu = torch.cuda.device_count()
+    #
+    # else:
+    #     # torch.cuda.set_device(args.local_rank)
+    #     # device = torch.device("cuda", args.local_rank)
+    #     # torch.distributed.init_process_group(backend='nccl')
+    #     # device = torch.device("cuda:1" if torch.cuda.is_available() and not args.no_cuda else "cpu")
+    #     device = torch.device("cuda:1")
+    #     args.n_gpu = 1
+    args.device = "cuda:0"
+    args.n_gpu = 1
 
     # 4. setup TPU
     if args.tpu:
@@ -232,7 +238,7 @@ def setup_training_step_seq(args, train_dataset, **kwargs):
         batch_size = args.train_batch_size // args.gradient_accumulation_steps // num_replicas
 
     train_dataloader = DataLoader(
-        train_dataset, sampler=train_sampler,batch_size=batch_size, **kwargs)
+        train_dataset, sampler=train_sampler,batch_size=batch_size, drop_last=True, **kwargs)
 
     # learning step
     if args.max_steps <= 0:
@@ -260,7 +266,7 @@ def setup_training_step(args, train_dataset, **kwargs):
         batch_size = args.train_batch_size // args.gradient_accumulation_steps // num_replicas
 
     train_dataloader = DataLoader(
-        train_dataset, sampler=train_sampler,batch_size=batch_size, **kwargs)
+        train_dataset, sampler=train_sampler,batch_size=batch_size, drop_last=True, **kwargs)
 
     # learning step
     if args.max_steps <= 0:
@@ -281,7 +287,7 @@ def setup_eval_step(args, eval_dataset, **kwargs):
     # Note that DistributedSampler samples randomly
     eval_sampler = SequentialSampler(eval_dataset) if args.local_rank == -1 else DistributedSampler(eval_dataset)
     eval_dataloader = DataLoader(
-        eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size, **kwargs)
+        eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size, drop_last=True, **kwargs)
     return eval_dataloader
 
 

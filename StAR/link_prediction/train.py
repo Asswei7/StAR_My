@@ -41,7 +41,39 @@ def data_collate_fn_general(batch, pad_id=0):
 class DatasetForPairwiseRankingLP(KbDataset):
     def __init__(self, *arg, **kwargs):
         super(DatasetForPairwiseRankingLP, self).__init__(*arg, **kwargs)
-        
+        examples = self.raw_examples
+        _head = []
+        _tail = []
+        for _item in examples:
+            _head.append(_item[0])
+            _tail.append(_item[-1])
+        # 认为出度和入度作用相同
+        _head.extend(_tail)
+        # 字典值，键为ID，值为出现的次数
+        self.c = collections.Counter(_head)
+        self.c = sorted(self.c.items(), key=lambda x: x[1], reverse=True)
+        self.c = dict(self.c)
+        d = collections.defaultdict(int)
+        preSum = collections.defaultdict(int)
+        self.ratio = collections.defaultdict(float)
+
+        for value in self.c.values():
+            if value == 1:
+                finished = sum(d.values())
+                d[value] = len(_head) - finished
+                break
+            d[value] += 1
+
+        keyList = list(d.keys())
+        valueList = list(d.values())
+        preSum[keyList[0]] = d[keyList[0]]
+        self.ratio[keyList[0]] = 1.0 * 5
+        for i in range(1, len(valueList)):
+            preSum[keyList[i]] = d[keyList[i]] + preSum[keyList[i - 1]]
+            t1 = (preSum[keyList[i]] - 1) / (len(examples) * 2)
+            t2 = 1.0 - t1
+            self.ratio[keyList[i]] = round(0.5 + 4.5 * t2, 2)
+
 
     def assemble_conponents(self, head_ids, rel_ids, tail_ids):
         max_ent_len = self.max_seq_length - 3 - len(rel_ids)
@@ -64,6 +96,18 @@ class DatasetForPairwiseRankingLP(KbDataset):
         if self.data_type == "train":  # this is for negative sampling
             assert self.subj2objs is not None and self.obj2subjs is not None
         pos_raw_ex = self.raw_examples[item]
+        pos_ratio = self.ratio[self.c[pos_raw_ex[0]]] + self.ratio[self.c[pos_raw_ex[-1]]]
+        #########################################################
+        # 增加两维数据，分别是头和边节点ID，以及尾节点ID headIdx, relIdx, tailIdx
+        # targets维度是实体数目，只有尾节点ID的下标是1
+        entNum = len(self.ent_list)
+
+        # headIdx = int(pos_raw_ex[0])
+        headIdx = self.ent2idx[pos_raw_ex[0]]
+        relIdx = int(self.rel2idx[pos_raw_ex[1]])
+        tailIdx = self.ent2idx[pos_raw_ex[2]]
+
+        ############################################################
         # negative sampling
         neg_raw_ex_set = set()
         neg_raw_ex_list = []
@@ -91,14 +135,18 @@ class DatasetForPairwiseRankingLP(KbDataset):
         for neg_raw_ex in neg_raw_ex_list:
             neg_data_p1, neg_data_p2 = self.assemble_conponents(
                 *self.convert_raw_example_to_features(neg_raw_ex, method="5"))
+            freq1 = self.ratio[self.c.get(neg_raw_ex[0], 1)]
+            freq2 = self.ratio[self.c.get(neg_raw_ex[-1], 1)]
+            neg_ratio = (freq1 + freq2) / 2
             neg_data = list(neg_data_p1) + list(neg_data_p2)
             neg_data = [torch.tensor(_ids, dtype=torch.long) for _ids in neg_data]
+            neg_data += [neg_ratio]
             neg_data_list.append(neg_data)
 
         virtual_batch = list(zip(*neg_data_list))
         # neg_times, sl
         neg_src_input_ids, neg_src_mask_ids, neg_src_segment_ids, \
-        neg_tgt_input_ids, neg_tgt_mask_ids, neg_tgt_segment_ids = virtual_batch
+        neg_tgt_input_ids, neg_tgt_mask_ids, neg_tgt_segment_ids, neg_ratio = virtual_batch
 
 
         return (
@@ -113,7 +161,12 @@ class DatasetForPairwiseRankingLP(KbDataset):
             neg_src_segment_ids,
             neg_tgt_input_ids,
             neg_tgt_mask_ids,
-            neg_tgt_segment_ids
+            neg_tgt_segment_ids,
+            torch.tensor(pos_ratio, dtype=torch.float),
+            torch.tensor(neg_ratio, dtype=torch.float),
+            torch.tensor(headIdx, dtype=torch.long),
+            torch.tensor(relIdx, dtype=torch.long),
+            torch.tensor(tailIdx, dtype=torch.long)
         )
 
     def data_collate_fn(self, batch):
@@ -125,7 +178,7 @@ class DatasetForPairwiseRankingLP(KbDataset):
             else:
                 padding_value = 0
 
-            if _idx_t >= 6:  # _tensors : bs * neg_times * sl
+            if _idx_t >= 6 and _idx_t < 12:  # _tensors : bs * neg_times * sl
                 # 2D padding
                 _max_len_last_dim = 0
                 # _tensors : bs * neg_times * sl
@@ -176,7 +229,12 @@ class DatasetForPairwiseRankingLP(KbDataset):
                 'neg_tgt_input_ids': batch[9],  # bs, sl
                 'neg_tgt_attention_mask': batch[10],  #
                 'neg_tgt_token_type_ids': batch[11],  #
-            }
+            },
+            'pos_ratio': batch[12],
+            'neg_ratio': batch[13],
+            'headIdx': batch[14],
+            'relIdx': batch[15],
+            'tailIdx': batch[16]
         }
         return inputs
 
@@ -292,13 +350,16 @@ def predict(args, raw_examples, dataset_list, model, verbose=True):
         hits_left.append([])
         hits_right.append([])
         hits.append([])
-
+    goodSample = []
+    badSample = []
     for _idx_ex, _triplet in enumerate(tqdm(raw_examples, desc="evaluating")):
         _head, _rel, _tail = _triplet
 
         head_ent_list = []
         tail_ent_list = []
-
+        pos_ratio = standard_dataset.ratio[standard_dataset.c[_head]] + standard_dataset.ratio[
+            standard_dataset.c[_tail]]
+        pos_ratio /= 2
         # head corrupt
         _pos_head_ents = g_obj2subjs[_tail][_rel]
         _neg_head_ents = ents - _pos_head_ents
@@ -334,6 +395,10 @@ def predict(args, raw_examples, dataset_list, model, verbose=True):
 
         local_scores_list = []
         sim_batch_size = args.eval_batch_size * 8
+
+        relIdx = int(standard_dataset.rel2idx[_rel])
+        relIdx = torch.tensor([relIdx]).to(args.device)
+
         if args.cls_method == "dis":
             for _idx_r in range(0, all_rep_src.shape[0], sim_batch_size):
                 _rep_src, _rep_tgt = all_rep_src[_idx_r: _idx_r + sim_batch_size], all_rep_tgt[
@@ -352,6 +417,55 @@ def predict(args, raw_examples, dataset_list, model, verbose=True):
                     logits = torch.softmax(logits, dim=-1)
                     local_scores = logits.detach().cpu().numpy()[:, 1]
                 local_scores_list.append(local_scores)
+        elif args.cls_method == "mix":
+            for _idx_r in range(0, all_rep_src.shape[0], sim_batch_size):
+                _rep_src, _rep_tgt = all_rep_src[_idx_r: _idx_r + sim_batch_size], all_rep_tgt[
+                                                                                   _idx_r: _idx_r + sim_batch_size]
+                _head = head_ent_list[_idx_r: _idx_r + sim_batch_size]
+                _tail = tail_ent_list[_idx_r: _idx_r + sim_batch_size]
+                if _idx_r < split_idx:
+                    tail = standard_dataset.ent2idx[_tail[0]]
+                    tailIdx = torch.tensor([tail]).to(args.device)
+                    with torch.no_grad():
+                        logits = model.classifier(_rep_src, _rep_tgt)
+                        logits = torch.softmax(logits, dim=-1)[:, 1]
+                        #####################################################
+                        structLogits = []
+                        for item in _head:
+                            # 从数据集中的ID转换为实际的ID号
+                            head = standard_dataset.ent2idx[item]
+                            headIdx = torch.tensor([head]).to(args.device)
+                            # 返回的是一个向量
+                            pred = model.structCal(headIdx, relIdx, tailIdx)
+                            pred = pred[0][tailIdx]
+                            structLogits.append(pred)
+
+                        structLogits = torch.tensor(structLogits).to(args.device)
+                        local_scores = structLogits + logits
+                        local_scores = local_scores.detach().cpu().numpy()
+                    local_scores_list.append(local_scores)
+                else:
+                    head = standard_dataset.ent2idx[_head[0]]
+                    headIdx = torch.tensor([head]).to(args.device)
+                    tailIdx = torch.tensor([1])
+                    pred = model.structCal(headIdx, relIdx, tailIdx)
+                    with torch.no_grad():
+                        logits = model.classifier(_rep_src, _rep_tgt)
+                        logits = torch.softmax(logits, dim=-1)[:, 1]
+                        #####################################################
+                        structLogits = []
+                        for item in _tail:
+                            # 从数据集中的ID转换为实际的ID号
+                            tail = standard_dataset.ent2idx[item]
+                            tailIdx = torch.tensor([tail]).to(args.device)
+                            # 返回的是一个向量
+                            predVal = pred[0][tailIdx]
+                            structLogits.append(predVal)
+                        structLogits = torch.tensor(structLogits).to(args.device)
+                        local_scores = structLogits + logits
+                        local_scores = local_scores.detach().cpu().numpy()
+                    local_scores_list.append(local_scores)
+
         scores = np.concatenate(local_scores_list, axis=0)
 
         # left
@@ -365,6 +479,12 @@ def predict(args, raw_examples, dataset_list, model, verbose=True):
         right_rank = safe_ranking(right_scores)
         ranks_right.append(right_rank)
         ranks.append(right_rank)
+
+
+        if left_rank <= 10:
+            goodSample.append(_triplet)
+        if left_rank >= 60:
+            badSample.append(_triplet)
 
         # log
         top_ten_hit_count += (int(left_rank <= 10) + int(right_rank <= 10))
@@ -401,7 +521,7 @@ def predict(args, raw_examples, dataset_list, model, verbose=True):
         logger.info('Mean reciprocal rank: {0}'.format(np.mean(1. / np.array(ranks))))
 
         tuple_ranks = [[int(_l), int(_r)] for _l, _r in zip(ranks_left, ranks_right)]
-        return tuple_ranks
+        return tuple_ranks, goodSample, badSample
 
 def predict_NELL(args, raw_examples, dataset_list, model, verbose=True):
     logging.info("***** Running Prediction*****")
@@ -698,7 +818,7 @@ def evaluate_pairwise_ranking(args, eval_dataset, model, tokenizer, global_step=
             embs = embs.detach().cpu()
             embs_list.append(embs)
     emb_mat = torch.cat(embs_list, dim=0).contiguous()
-    assert emb_mat.shape[0] == len(input_ids_list)
+    # assert emb_mat.shape[0] == len(input_ids_list)
 
     # -------------------------  assign to ent ------------------------------
 
@@ -780,10 +900,15 @@ def evaluate_pairwise_ranking(args, eval_dataset, model, tokenizer, global_step=
                 with torch.no_grad():
                     logits = model.classifier(_rep_src, _rep_tgt)
                     logits = torch.softmax(logits, dim=-1)[:, 1]
-                    distances = model.distance_metric_fn(_rep_src, _rep_tgt)
-                    if args.distance_metric == "bilinear":
-                        distances = torch.softmax(distances, dim=-1)
-                    local_scores = torch.div(logits, distances + 0.1)
+                    headIdx = eval_dataset.ent2idx[_head]
+                    relIdx = int(eval_dataset.rel2idx[_rel])
+                    tailIdx = eval_dataset.ent2idx[_tail]
+                    headIdx = torch.tensor([headIdx]).to(args.device)
+                    relIdx = torch.tensor([relIdx]).to(args.device)
+                    tailIdx = torch.tensor([tailIdx]).to(args.device)
+                    structLogits = model.structCal(headIdx, relIdx, tailIdx)
+                    structLogits = torch.softmax(structLogits, dim=-1)[:, 1]
+                    local_scores = structLogits + logits
                     local_scores = local_scores.detach().cpu().numpy()
                 local_scores_list.append(local_scores)
         scores = np.concatenate(local_scores_list, axis=0)
@@ -852,7 +977,7 @@ def evaluate_pairwise_ranking(args, eval_dataset, model, tokenizer, global_step=
     return np.mean(hits[9])
 
 def main():
-    os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_class", default="roberta", type=str,
                         help="model class, one of [bert, roberta]")
@@ -890,7 +1015,10 @@ def main():
 
     # setup
     setup_prerequisite(args)
-
+    print("+++++++++++++++++++++++++++++++++++++++++")
+    print("n:",args.n_gpu)
+    print(args.device)
+    print("+++++++++++++++++++++++++++++++++++++++++")
     # Load pretrained model and tokenizer
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
@@ -917,28 +1045,18 @@ def main():
     config.loss_weight = args.loss_weight
     config.cls_loss_weight = args.cls_loss_weight
 
+    print("args.tokenizer_name:", args.tokenizer_name)
     tokenizer = tokenizer_class.from_pretrained(
         args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
         do_lower_case=args.do_lower_case)
-    model = model_class.from_pretrained(args.model_name_or_path, config=config)
 
-    if args.local_rank == 0:
-        torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
-    model.to(args.device)
-    logger.info("Training/evaluation parameters %s", args)
-
-    # Dataset
     neg_weights = [1., 1., 0.] if args.neg_weights is None else [float(_e) for _e in args.neg_weights.split(",")]
-    assert len(neg_weights) == 3 and sum(neg_weights) > 0
-
     train_dataset = DatasetForPairwiseRankingLP(
         args.dataset, "train", None, "./data/",
         args.model_class, tokenizer, args.do_lower_case,
-        args.max_seq_length,  neg_times=5 ,neg_weights=neg_weights,
+        args.max_seq_length, neg_times=5, neg_weights=neg_weights,
         type_cons_neg_sample=args.type_cons_neg_sample, type_cons_ratio=args.type_cons_ratio
     )
-
-
     dev_dataset = DatasetForPairwiseRankingLP(
         args.dataset, "dev", None, "./data/",
         args.model_class, tokenizer, args.do_lower_case,
@@ -949,6 +1067,24 @@ def main():
         args.model_class, tokenizer, args.do_lower_case,
         args.max_seq_length,
     )
+    config.ent_num = len(test_dataset.ent_list)
+    model = model_class.from_pretrained(args.model_name_or_path, config=config)
+    # model = model_class.from_pretrained(args.model_name_or_path)
+    if args.local_rank == 0:
+        torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
+    model.init()
+    model.to('cuda:0')
+    print("+++++++++++++++++++++++++++++++++++++++++")
+    logger.info("Training/evaluation parameters %s", args)
+
+    # Dataset
+
+    assert len(neg_weights) == 3 and sum(neg_weights) > 0
+
+
+
+
+
 
     if args.do_train:
         train(args, train_dataset, model, tokenizer, eval_dataset=dev_dataset, eval_fn=evaluate_pairwise_ranking)
@@ -961,10 +1097,12 @@ def main():
         if args.dataset == "NELL_standard":
             predict_NELL(args, test_dataset.raw_examples, dataset_list, model, verbose=True)
         else:
-            tuple_ranks = predict(
+            tuple_ranks, goodSample, badSample = predict(
                 args, test_dataset.raw_examples, dataset_list, model, verbose=True)
             output_str = calculate_metrics_for_link_prediction(tuple_ranks, verbose=True)
             save_json(tuple_ranks, join(args.output_dir, "tuple_ranks.json"))
+            save_json(goodSample, "goodSample.json")
+            save_json(badSample, "badSample.json")
             with open(join(args.output_dir, "link_prediction_metrics.txt"), "w", encoding="utf-8") as fp:
                 fp.write(output_str)
 
